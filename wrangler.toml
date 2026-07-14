@@ -1,0 +1,19 @@
+# Cloudflare Pages + Pages Functions + D1 configuration.
+#
+# Pages Functions live under /functions and are deployed automatically with the
+# static assets in ./dist. The D1 binding below is exposed to every function as
+# `context.env.DB`.
+name = "web-factory-game"
+compatibility_date = "2025-01-09"
+pages_build_output_dir = "./dist"
+
+# --- D1 (serverless SQLite) binding -----------------------------------------
+# `binding` is the name available on `context.env` inside Pages Functions.
+# `database_id` comes from `wrangler d1 create web-factory-db`.
+[[d1_databases]]
+binding = "DB"
+database_name = "web-factory-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# Optional: separate preview DB so branch previews never touch production data.
+preview_database_id = "REPLACE_WITH_YOUR_D1_PREVIEW_DATABASE_ID"
