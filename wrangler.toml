@@ -13,7 +13,9 @@ pages_build_output_dir = "./dist"
 [[d1_databases]]
 binding = "DB"
 database_name = "web-factory-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "c79ec08f-cee4-4682-8783-e4db0feeee2f"
 
 # Optional: separate preview DB so branch previews never touch production data.
-preview_database_id = "REPLACE_WITH_YOUR_D1_PREVIEW_DATABASE_ID"
+# Points at the same database for now; create a dedicated preview DB later with
+# `wrangler d1 create web-factory-db-preview` and swap this id in.
+preview_database_id = "c79ec08f-cee4-4682-8783-e4db0feeee2f"
