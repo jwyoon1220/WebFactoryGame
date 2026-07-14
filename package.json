@@ -1,0 +1,33 @@
+{
+  "name": "web-factory-game",
+  "version": "0.1.0",
+  "description": "High-performance web-based 2D factory automation game on Cloudflare Pages + D1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "pages:dev": "wrangler pages dev ./dist --d1 DB=web-factory-db",
+    "pages:deploy": "wrangler pages deploy ./dist",
+    "db:init:local": "wrangler d1 execute web-factory-db --local --file=./db/schema.sql",
+    "db:init:remote": "wrangler d1 execute web-factory-db --remote --file=./db/schema.sql",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "pixi.js": "^8.6.6",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "@types/node": "^22.20.1",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7",
+    "vitest": "^2.1.8",
+    "wrangler": "^3.101.0"
+  }
+}
