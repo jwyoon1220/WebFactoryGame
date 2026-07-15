@@ -137,9 +137,15 @@ export class BeltSegment {
   /**
    * Remove and return the head item once it has reached the exit. Returns
    * ItemId.None if nothing is ready. Handing the exit space back to the pack is
-   * automatic: the new head inherits the departed item's footprint as gap, so
-   * usedLength (a back-of-belt measure) is intentionally left unchanged until
-   * the next advance() actually shifts the pack forward.
+   * automatic when items remain: the new head inherits the departed item's
+   * footprint as gap, so usedLength (a back-of-belt measure) needs no change —
+   * the popped item's gap was 0 (headReady precondition), so the invariant
+   * `usedLength === Σgap + items.length*ITEM_LEN` already holds unmodified.
+   * But when the popped item was the LAST one, there is no new head to carry
+   * that accounting forward, so usedLength must be reset to 0 (an empty
+   * segment trivially has none in use) — otherwise a phantom ITEM_LEN of
+   * "used" space leaks in permanently every time the segment fully drains,
+   * eventually starving canAccept() for good after enough drain cycles.
    */
   popHead(): ItemId {
     if (!this.headReady) return ItemId.None;
@@ -148,6 +154,8 @@ export class BeltSegment {
       // New head's gap was measured to the old head's trailing edge; the exit
       // line is ITEM_LEN further, so extend it.
       this.items[0].gap += ITEM_LEN;
+    } else {
+      this.usedLength = 0;
     }
     return removed.item;
   }

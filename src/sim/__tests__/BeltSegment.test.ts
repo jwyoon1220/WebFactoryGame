@@ -56,4 +56,27 @@ describe("BeltSegment", () => {
     }
     expect(out).toEqual(inOrder);
   });
+
+  it("regression: draining to fully empty repeatedly must not leak capacity", () => {
+    // popHead() on the LAST item in a segment must reset usedLength to 0.
+    // Before the fix, it left a phantom ITEM_LEN of "used" space behind every
+    // time the segment fully drained, so after enough drain-to-empty cycles
+    // canAccept() would go permanently false even though the segment was
+    // genuinely empty — production would appear to "work at first, then stop"
+    // once enough cycles had passed.
+    const s = seg(1, 64); // 1 tile, fast enough to drain in a handful of ticks
+    const cycles = 20; // far more than (length/ITEM_LEN) = 4, the old leak budget
+    for (let c = 0; c < cycles; c++) {
+      expect(s.canAccept(), `cycle ${c}: should still accept before insert`).toBe(true);
+      expect(s.pushBack(ItemId.IronOre)).toBe(true);
+      // Run enough ticks for the single item to reach the exit and be popped.
+      for (let t = 0; t < 10 && !s.headReady; t++) s.advance();
+      expect(s.headReady, `cycle ${c}: item should have reached the exit`).toBe(true);
+      expect(s.popHead()).toBe(ItemId.IronOre);
+      expect(s.isEmpty).toBe(true);
+    }
+    // After many full drain cycles, the segment must still report full
+    // capacity available — no leaked "used" space remains.
+    expect(s.canAccept()).toBe(true);
+  });
 });
