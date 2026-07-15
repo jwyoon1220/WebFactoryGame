@@ -18,9 +18,14 @@ export interface ChunkSource {
   getSimTick(): number;
 }
 
+export type SaveStatus = "idle" | "dirty" | "saving" | "error";
+
 export class SaveScheduler {
   private dirty = new Set<string>(); // "cx,cy"
   private timer: ReturnType<typeof setInterval> | null = null;
+
+  /** Surfaced to the HUD so the player can see autosave is actually working. */
+  onStatusChange: (status: SaveStatus, savedAt?: number) => void = () => {};
 
   constructor(
     private readonly worldId: string,
@@ -31,7 +36,9 @@ export class SaveScheduler {
 
   /** Mark a chunk as needing persistence (called on any edit within it). */
   markDirty(cx: number, cy: number): void {
+    const wasEmpty = this.dirty.size === 0;
     this.dirty.add(`${cx},${cy}`);
+    if (wasEmpty) this.onStatusChange("dirty");
   }
 
   start(): void {
@@ -73,6 +80,7 @@ export class SaveScheduler {
     const payload = this.buildPayload();
     if (!payload) return;
     const snapshot = new Set(this.dirty);
+    this.onStatusChange("saving");
     try {
       const res = await fetch("/api/save", {
         method: "POST",
@@ -81,9 +89,15 @@ export class SaveScheduler {
         // Same-origin: cookies flow, no CORS. keepalive helps late flushes.
         keepalive: true,
       });
-      if (res.ok) for (const k of snapshot) this.dirty.delete(k);
+      if (res.ok) {
+        for (const k of snapshot) this.dirty.delete(k);
+        this.onStatusChange(this.dirty.size > 0 ? "dirty" : "idle", Date.now());
+      } else {
+        this.onStatusChange("error");
+      }
     } catch {
       // Keep chunks dirty; next interval retries.
+      this.onStatusChange("error");
     }
   }
 

@@ -202,6 +202,22 @@ export class WorldState implements ChunkSource {
     return true;
   }
 
+  /**
+   * Change which recipe a smelter/assembler runs. Resets in-progress work
+   * (buffers are kept — a partially-filled input just waits for the new
+   * recipe to consume it, or sits unused if it no longer applies).
+   */
+  setRecipe(tx: number, ty: number, recipeIndex: number): boolean {
+    const e = this.entityGrid.get(this.tk(tx, ty));
+    if (!e || !isMachine(e) || e.type === EntityType.Miner) return false;
+    const recipe = RECIPES[recipeIndex];
+    if (!recipe || recipe.machine !== e.type) return false;
+    e.recipe = recipeIndex;
+    e.progress = 0;
+    this.onDirty(this.chunkOf(tx), this.chunkOf(ty));
+    return true;
+  }
+
   // --- Belt linking ---------------------------------------------------------
 
   /** Point each belt's exit at the neighbouring belt it faces (if any). */
