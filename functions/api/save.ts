@@ -16,6 +16,7 @@
 // =============================================================================
 
 import type { SavePayload } from "../../src/shared/types";
+import { resolveWorldId } from "../../src/server/identity";
 
 interface Env {
   DB: D1Database;
@@ -37,13 +38,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     return json({ error: "invalid JSON body" }, 400);
   }
 
-  if (!payload.worldId || !Array.isArray(payload.chunks)) {
-    return json({ error: "worldId and chunks[] are required" }, 400);
+  if (!Array.isArray(payload.chunks)) {
+    return json({ error: "chunks[] is required" }, 400);
   }
   // Guard against oversized flushes hammering the write budget.
   if (payload.chunks.length > 4096) {
     return json({ error: "too many chunks in one flush" }, 413);
   }
+
+  // Same identity rule as /api/load: prefer the explicit id the client got back
+  // from load, else fall back to the per-IP world. Keeps save/load in lockstep.
+  const worldId = await resolveWorldId(request, payload.worldId);
 
   const now = Date.now();
 
@@ -62,7 +67,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
   const statements: D1PreparedStatement[] = payload.chunks.map((chunk) =>
     upsertChunk.bind(
-      payload.worldId,
+      worldId,
       chunk.cx,
       chunk.cy,
       JSON.stringify(chunk), // the entire ChunkTileData blob
@@ -81,7 +86,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
              research_json = ?4
        WHERE id = ?1`
     ).bind(
-      payload.worldId,
+      worldId,
       now,
       payload.simTick | 0,
       JSON.stringify(payload.research ?? {})

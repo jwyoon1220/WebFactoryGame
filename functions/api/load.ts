@@ -11,6 +11,7 @@
 // =============================================================================
 
 import type { ChunkTileData, LoadResponse, ResearchState } from "../../src/shared/types";
+import { resolveWorldId } from "../../src/server/identity";
 
 interface Env {
   DB: D1Database;
@@ -35,18 +36,50 @@ interface WorldRow {
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   const { request, env } = context;
   const url = new URL(request.url);
-  const worldId = url.searchParams.get("worldId");
-  if (!worldId) return json({ error: "worldId is required" }, 400);
+  // No worldId query param -> resolve one from the visitor's IP (login-free,
+  // per-IP world). An explicit ?worldId= shares/overrides a specific world.
+  const worldId = await resolveWorldId(request, url.searchParams.get("worldId"));
 
-  // 1. World header (single row).
-  const world = await env.DB.prepare(
+  const selectWorld = env.DB.prepare(
     `SELECT id, name, seed, sim_tick, last_saved_at, schema_version, research_json
        FROM worlds WHERE id = ?1`
-  )
-    .bind(worldId)
-    .first<WorldRow>();
+  );
 
-  if (!world) return json({ error: "world not found" }, 404);
+  // 1. World header (single row).
+  let world = await selectWorld.bind(worldId).first<WorldRow>();
+
+  // Auto-provision on first visit: the worldId doubles as a save slot, so if no
+  // world exists yet we create a fresh empty one (and a default local player to
+  // satisfy the FK) and continue. This makes a brand-new deployment "just work"
+  // without a manual seed step. Concurrent first-loads are safe via OR IGNORE.
+  if (!world) {
+    const now = Date.now();
+    const seed = Math.floor(Math.random() * 0x7fffffff);
+    const playerId = "local-player";
+    try {
+      await env.DB.batch([
+        env.DB
+          .prepare(
+            `INSERT OR IGNORE INTO players (id, email, display_name, created_at, last_login_at)
+             VALUES (?1, ?2, 'Engineer', ?3, ?3)`
+          )
+          .bind(playerId, `${playerId}@local`, now),
+        env.DB
+          .prepare(
+            `INSERT OR IGNORE INTO worlds
+               (id, player_id, name, seed, created_at, last_saved_at, sim_tick, schema_version, research_json, tech_json)
+             VALUES (?1, ?2, 'New Factory', ?3, ?4, ?4, 0, 1, '{}', '{}')`
+          )
+          .bind(worldId, playerId, seed, now),
+      ]);
+    } catch (err) {
+      // The most common cause here is missing tables -> tell the operator.
+      return json({ error: "db not initialized (run db:init:remote)", detail: String(err) }, 500);
+    }
+    world = await selectWorld.bind(worldId).first<WorldRow>();
+  }
+
+  if (!world) return json({ error: "world could not be created" }, 500);
 
   // 2. Chunks — either a viewport window or the whole world.
   const hasWindow =

@@ -28,11 +28,22 @@ export interface BootResult {
   offline: OfflineReport;
 }
 
-export async function boot(worldId: string, canvas: HTMLCanvasElement): Promise<BootResult> {
-  // 1. LOAD authoritative state from D1 via the Pages Function.
-  const res = await fetch(`/api/load?worldId=${encodeURIComponent(worldId)}`);
+/**
+ * @param explicitWorldId  a shared/override world id (from `?world=`), or null
+ *   to let the server assign a per-IP world. The resolved id comes back in the
+ *   load response and is what we save under.
+ */
+export async function boot(explicitWorldId: string | null, canvas: HTMLCanvasElement): Promise<BootResult> {
+  // 1. LOAD authoritative state from D1 via the Pages Function. Omitting
+  //    worldId asks the server to resolve one from our IP (login-free).
+  const loadUrl = explicitWorldId
+    ? `/api/load?worldId=${encodeURIComponent(explicitWorldId)}`
+    : `/api/load`;
+  const res = await fetch(loadUrl);
   if (!res.ok) throw new Error(`load failed: ${res.status}`);
   const data = (await res.json()) as LoadResponse;
+  // The server-resolved id (per-IP or explicit) is the one we persist under.
+  const worldId = data.world.id;
 
   const engine = new SimulationEngine();
   const world = new WorldState(engine, data.research);
