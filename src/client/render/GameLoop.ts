@@ -13,6 +13,7 @@ import { RECIPES } from "@shared/recipes";
 import type { SimulationEngine } from "@sim/SimulationEngine";
 import type { WorldState } from "../WorldState";
 import type { BuildState } from "../BuildState";
+import { entityIcon, entityLabel, itemIcon, itemLabel, recipeLabel, recipesForMachine } from "../labels";
 
 const TILE = 34; // px per tile at zoom 1
 
@@ -29,6 +30,13 @@ const DIR_VEC: Array<[number, number]> = [
   [-1, 0],
 ];
 
+const STATE_LABEL: Record<MachineState, string> = {
+  [MachineState.Idle]: "대기 중 (재료 부족)",
+  [MachineState.Working]: "작동 중",
+  [MachineState.NoPower]: "전력 부족",
+  [MachineState.OutputFull]: "출력 가득 참",
+};
+
 export class GameLoop {
   readonly app: Application;
   private engine: SimulationEngine;
@@ -38,16 +46,20 @@ export class GameLoop {
   private layer = new Container();
   private gfx = new Graphics(); // terrain + entities, redrawn each frame
   private itemsGfx = new Graphics(); // moving belt items
-  private uiGfx = new Graphics(); // hover ghost + highlight
+  private uiGfx = new Graphics(); // hover ghost + selection highlight
 
   camera: Camera = { x: 0, y: 0, zoom: 1 };
   private hover = { tx: 0, ty: 0, inside: false };
+  /** Tile "locked in" by a click with the move tool; the inspector tracks it
+   *  live until the player clicks it again or picks another tile. */
+  private selected: { tx: number; ty: number } | null = null;
   private pointerDown = false;
   private dragged = false;
   private lastPointer = { x: 0, y: 0 };
   private painted = new Set<string>(); // tiles painted during one drag
+  private inspectTimer: ReturnType<typeof setInterval> | null = null;
 
-  /** Optional callback when the selected/hovered tile changes (for the HUD). */
+  /** Fired whenever the inspected tile's content changes (hover or selection). */
   onInspect: (info: InspectInfo | null) => void = () => {};
 
   constructor(app: Application, engine: SimulationEngine, world: WorldState, build: BuildState) {
@@ -63,11 +75,21 @@ export class GameLoop {
   start(): void {
     this.engine.start();
     this.app.ticker.add(this.frame);
+    // Poll the inspected tile a few times a second so progress bars / buffer
+    // counts stay live without re-emitting on every 60Hz frame.
+    this.inspectTimer = setInterval(() => this.refreshInspect(), 200);
   }
   stop(): void {
     this.app.ticker.remove(this.frame);
     this.engine.stop();
     this.unbindInput();
+    if (this.inspectTimer) clearInterval(this.inspectTimer);
+  }
+
+  /** Center the camera on the origin — used once after boot. */
+  centerOn(tx: number, ty: number): void {
+    this.camera.x = tx * TILE;
+    this.camera.y = ty * TILE;
   }
 
   // --- Main loop ------------------------------------------------------------
@@ -120,10 +142,14 @@ export class GameLoop {
         const a = p(tx * TILE, ty * TILE);
         const size = TILE * s;
         const ore = this.world.oreAtTile(tx, ty);
-        if (ore !== ItemId.None) {
+        // Origin marker: a faint highlight at (0,0) so a fresh player can spot
+        // their spawn point at a glance.
+        if (tx === 0 && ty === 0) {
+          g.rect(a.x, a.y, size, size).fill({ color: 0x2c3a4e, alpha: 0.9 });
+        } else if (ore !== ItemId.None) {
           g.rect(a.x, a.y, size, size).fill({ color: ORE_COLOR[ore] ?? 0x333333, alpha: 0.55 });
         }
-        g.rect(a.x, a.y, size, size).stroke({ color: 0x232a36, width: 1, alpha: 0.6 });
+        g.rect(a.x, a.y, size, size).stroke({ color: 0x232a36, width: 1, alpha: 0.55 });
       }
     }
 
@@ -151,12 +177,19 @@ export class GameLoop {
           const wx = tx * TILE + TILE / 2 + dx * off;
           const wy = ty * TILE + TILE / 2 + dy * off;
           const a = p(wx, wy);
-          this.itemsGfx.circle(a.x, a.y, Math.max(2, TILE * 0.16 * s)).fill(ITEM_COLOR[item] ?? 0xffffff);
+          this.itemsGfx
+            .circle(a.x, a.y, Math.max(2, TILE * 0.16 * s))
+            .fill(ITEM_COLOR[item] ?? 0xffffff)
+            .stroke({ color: 0x10141c, width: 1, alpha: 0.6 });
         });
       }
     }
 
-    // 4. Hover ghost / highlight.
+    // 4. Selection (locked) + hover ghost.
+    if (this.selected) {
+      const a = p(this.selected.tx * TILE, this.selected.ty * TILE);
+      this.uiGfx.rect(a.x, a.y, TILE * s, TILE * s).stroke({ color: 0x7fd1ff, width: 3, alpha: 0.9 });
+    }
     if (this.hover.inside) {
       const a = p(this.hover.tx * TILE, this.hover.ty * TILE);
       const size = TILE * s;
@@ -164,8 +197,8 @@ export class GameLoop {
         const ok = this.canPlaceHere(this.build.tool.type, this.hover.tx, this.hover.ty);
         this.uiGfx.rect(a.x, a.y, size, size).fill({ color: ok ? 0x4ec06a : 0xc0503f, alpha: 0.35 });
         this.drawDirNotch(this.uiGfx, this.hover.tx, this.hover.ty, this.build.dir, s, p, 0xffffff);
-      } else {
-        this.uiGfx.rect(a.x, a.y, size, size).stroke({ color: 0xffffff, width: 2, alpha: 0.5 });
+      } else if (!this.selected || this.selected.tx !== this.hover.tx || this.selected.ty !== this.hover.ty) {
+        this.uiGfx.rect(a.x, a.y, size, size).stroke({ color: 0xffffff, width: 1.5, alpha: 0.4 });
       }
     }
   }
@@ -188,7 +221,7 @@ export class GameLoop {
       return;
     }
     const color = ENTITY_COLOR[e.type] ?? 0x777777;
-    g.rect(a.x, a.y, size, size).fill(color).stroke({ color: 0x101418, width: 2 });
+    g.roundRect(a.x, a.y, size, size, 4 * s).fill(color).stroke({ color: 0x101418, width: 2 });
     this.drawDirNotch(g, tx, ty, e.dir, s, p, 0x11151b);
 
     // Progress bar for working machines.
@@ -197,9 +230,10 @@ export class GameLoop {
       if (recipe && recipe.ticks > 0) {
         const frac = Math.max(0, Math.min(1, e.progress / recipe.ticks));
         const bar = p(tx * TILE + TILE * 0.12, ty * TILE + TILE * 0.86);
-        g.rect(bar.x, bar.y, TILE * 0.76 * s * frac, TILE * 0.08 * s).fill(
-          e.state === MachineState.NoPower ? 0xc0503f : 0x6ad06a
-        );
+        const barColor =
+          e.state === MachineState.NoPower ? 0xc0503f : e.state === MachineState.Working ? 0x6ad06a : 0x8a8f9c;
+        g.rect(bar.x, bar.y, TILE * 0.76 * s, TILE * 0.08 * s).fill({ color: 0x11151b, alpha: 0.6 });
+        if (frac > 0) g.rect(bar.x, bar.y, TILE * 0.76 * s * frac, TILE * 0.08 * s).fill(barColor);
       }
     }
   }
@@ -259,6 +293,7 @@ export class GameLoop {
     if (e.button === 2) {
       const { tx, ty } = this.screenToTile(e.clientX, e.clientY);
       this.world.remove(tx, ty);
+      this.clearSelectionIfMatches(tx, ty);
       return;
     }
     // Left with a build tool: begin painting.
@@ -273,8 +308,9 @@ export class GameLoop {
     const sy = e.clientY - rect.top;
     const { tx, ty } = this.screenToTile(sx, sy);
     const inside = sx >= 0 && sy >= 0 && sx <= rect.width && sy <= rect.height;
+    const hoverChanged = tx !== this.hover.tx || ty !== this.hover.ty || inside !== this.hover.inside;
     this.hover = { tx, ty, inside };
-    if (inside) this.emitInspect(tx, ty);
+    if (hoverChanged && !this.selected) this.refreshInspect();
 
     if (!this.pointerDown) return;
     const dx = e.clientX - this.lastPointer.x;
@@ -282,7 +318,7 @@ export class GameLoop {
     if (Math.abs(dx) + Math.abs(dy) > 2) this.dragged = true;
 
     const panning =
-      e.buttons & 4 || // middle
+      !!(e.buttons & 4) || // middle
       this.build.tool.kind === "move"; // move tool pans with left drag
     if (panning) {
       this.camera.x -= dx / this.camera.zoom;
@@ -291,6 +327,7 @@ export class GameLoop {
       this.paintAt(sx, sy); // drag-paint belts/machines
     } else if (this.build.tool.kind === "delete" && e.buttons & 1) {
       this.world.remove(tx, ty);
+      this.clearSelectionIfMatches(tx, ty);
     }
     this.lastPointer = { x: e.clientX, y: e.clientY };
   };
@@ -301,11 +338,28 @@ export class GameLoop {
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
       const { tx, ty } = this.screenToTile(sx, sy);
-      if (this.build.tool.kind === "delete") this.world.remove(tx, ty);
-      else if (this.build.tool.kind === "build") this.paintAt(sx, sy);
+      if (this.build.tool.kind === "delete") {
+        this.world.remove(tx, ty);
+        this.clearSelectionIfMatches(tx, ty);
+      } else if (this.build.tool.kind === "build") {
+        this.paintAt(sx, sy);
+      } else {
+        // Move tool: click toggles a "locked" selection so the inspector
+        // keeps showing this tile's live stats even after the mouse leaves.
+        this.selected =
+          this.selected && this.selected.tx === tx && this.selected.ty === ty ? null : { tx, ty };
+        this.refreshInspect();
+      }
     }
     this.pointerDown = false;
   };
+
+  private clearSelectionIfMatches(tx: number, ty: number): void {
+    if (this.selected && this.selected.tx === tx && this.selected.ty === ty) {
+      this.selected = null;
+      this.refreshInspect();
+    }
+  }
 
   private onWheel = (e: WheelEvent): void => {
     e.preventDefault();
@@ -335,33 +389,112 @@ export class GameLoop {
     this.world.place(tx, ty, this.build.tool.type, this.build.dir);
   }
 
-  private emitInspect(tx: number, ty: number): void {
+  // --- Inspector --------------------------------------------------------------
+
+  private refreshInspect(): void {
+    const tile = this.selected ?? (this.hover.inside ? { tx: this.hover.tx, ty: this.hover.ty } : null);
+    // Bare ground (no ore, nothing built) has nothing worth showing — don't
+    // pop an empty panel on every hover, and drop a stale selection on it.
+    if (tile && !this.world.entityAtTile(tile.tx, tile.ty) && this.world.oreAtTile(tile.tx, tile.ty) === ItemId.None) {
+      if (this.selected && this.selected.tx === tile.tx && this.selected.ty === tile.ty) this.selected = null;
+      this.onInspect(null);
+      return;
+    }
+    if (!tile) {
+      this.onInspect(null);
+      return;
+    }
+    this.onInspect(this.buildInspectInfo(tile.tx, tile.ty, !!this.selected));
+  }
+
+  private buildInspectInfo(tx: number, ty: number, locked: boolean): InspectInfo {
     const e = this.world.entityAtTile(tx, ty);
     if (!e) {
       const ore = this.world.oreAtTile(tx, ty);
-      this.onInspect(ore !== ItemId.None ? { title: ItemId[ore], lines: ["ore deposit"] } : null);
-      return;
+      return {
+        tx,
+        ty,
+        locked,
+        icon: itemIcon(ore),
+        title: `${itemLabel(ore)} 매장지`,
+        lines: ["⛏ 채굴기를 설치하면 자동으로 캐냅니다."],
+      };
     }
+
+    if (e.type === EntityType.Belt) {
+      const seg = this.world.beltSystem.getSegment(this.world.beltSegmentIdAt(tx, ty) ?? -1);
+      return {
+        tx,
+        ty,
+        locked,
+        icon: entityIcon(EntityType.Belt),
+        title: entityLabel(EntityType.Belt),
+        lines: [`실려 있는 아이템: ${seg?.itemCount ?? 0}개`],
+      };
+    }
+
+    if (e.type === EntityType.Chest) {
+      const lines = invLines(e.inventory);
+      return {
+        tx,
+        ty,
+        locked,
+        icon: entityIcon(EntityType.Chest),
+        title: entityLabel(EntityType.Chest),
+        lines: lines.length ? lines : ["비어 있음"],
+      };
+    }
+
+    // Machines (miner/smelter/assembler/lab/generator).
     const lines: string[] = [];
-    if ("input" in e) lines.push("in: " + invStr(e.input));
-    if ("output" in e) lines.push("out: " + invStr(e.output));
-    if ("inventory" in e) lines.push(invStr(e.inventory));
-    this.onInspect({ title: EntityType[e.type], lines });
+    if ("input" in e) lines.push(...invLines(e.input, "투입"));
+    if ("output" in e) lines.push(...invLines(e.output, "산출"));
+    const info: InspectInfo = {
+      tx,
+      ty,
+      locked,
+      icon: entityIcon(e.type),
+      title: entityLabel(e.type),
+      lines,
+      state: "state" in e ? e.state : undefined,
+      stateLabel: "state" in e ? STATE_LABEL[e.state] : undefined,
+    };
+    if ("recipe" in e && "progress" in e) {
+      const recipe = e.recipe >= 0 ? RECIPES[e.recipe] : null;
+      info.progressFrac = recipe && recipe.ticks > 0 ? Math.max(0, Math.min(1, e.progress / recipe.ticks)) : 0;
+      info.currentRecipe = e.recipe;
+      info.currentRecipeLabel = e.recipe >= 0 ? recipeLabel(e.recipe) : undefined;
+    }
+    if (e.type === EntityType.Smelter || e.type === EntityType.Assembler) {
+      info.recipeOptions = recipesForMachine(e.type);
+    }
+    return info;
   }
 }
 
 type Fn = (wx: number, wy: number) => { x: number; y: number };
 
 export interface InspectInfo {
+  tx: number;
+  ty: number;
+  /** True when the player clicked to "lock" this tile (vs. just hovering). */
+  locked: boolean;
+  icon: string;
   title: string;
   lines: string[];
+  state?: MachineState;
+  stateLabel?: string;
+  progressFrac?: number;
+  currentRecipe?: number;
+  currentRecipeLabel?: string;
+  recipeOptions?: Array<{ index: number; label: string }>;
 }
 
-function invStr(inv: Partial<Record<ItemId, number>>): string {
-  const parts = Object.entries(inv)
-    .filter(([, n]) => (n ?? 0) > 0)
-    .map(([k, n]) => `${ItemId[Number(k) as ItemId]}×${n}`);
-  return parts.length ? parts.join(", ") : "—";
+function invLines(inv: Partial<Record<ItemId, number>>, prefix?: string): string[] {
+  const entries = Object.entries(inv).filter(([, n]) => (n ?? 0) > 0);
+  if (entries.length === 0) return [];
+  const body = entries.map(([k, n]) => `${itemIcon(Number(k) as ItemId)} ${itemLabel(Number(k) as ItemId)} ×${n}`);
+  return prefix ? [`${prefix}: ${body.join(", ")}`] : body;
 }
 
 const ORE_COLOR: Partial<Record<ItemId, number>> = {
