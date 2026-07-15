@@ -9,7 +9,8 @@ import { useEffect, useRef, useState } from "react";
 import { boot, type BootResult } from "./boot";
 import { ItemId } from "@shared/types";
 
-const WORLD_ID = new URLSearchParams(location.search).get("world") ?? "demo-world";
+// null -> the server assigns a per-IP world; `?world=<id>` shares a specific one.
+const EXPLICIT_WORLD = new URLSearchParams(location.search).get("world");
 
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -21,7 +22,7 @@ export function App() {
     let booted: BootResult | null = null;
     if (!canvasRef.current) return;
 
-    boot(WORLD_ID, canvasRef.current)
+    boot(EXPLICIT_WORLD, canvasRef.current)
       .then((r) => {
         if (disposed) {
           r.loop.stop();

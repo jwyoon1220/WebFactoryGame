@@ -11,6 +11,7 @@
 // =============================================================================
 
 import type { ChunkTileData, LoadResponse, ResearchState } from "../../src/shared/types";
+import { resolveWorldId } from "../../src/server/identity";
 
 interface Env {
   DB: D1Database;
@@ -35,8 +36,9 @@ interface WorldRow {
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   const { request, env } = context;
   const url = new URL(request.url);
-  const worldId = url.searchParams.get("worldId");
-  if (!worldId) return json({ error: "worldId is required" }, 400);
+  // No worldId query param -> resolve one from the visitor's IP (login-free,
+  // per-IP world). An explicit ?worldId= shares/overrides a specific world.
+  const worldId = await resolveWorldId(request, url.searchParams.get("worldId"));
 
   const selectWorld = env.DB.prepare(
     `SELECT id, name, seed, sim_tick, last_saved_at, schema_version, research_json
