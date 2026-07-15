@@ -13,6 +13,7 @@ import { SimulationEngine } from "@sim/SimulationEngine";
 import { GameLoop } from "./render/GameLoop";
 import { SaveScheduler } from "./SaveScheduler";
 import { WorldState } from "./WorldState";
+import { createBuildState, type BuildState } from "./BuildState";
 import {
   OfflineProgressSimulator,
   type OfflineReport,
@@ -25,6 +26,7 @@ export interface BootResult {
   world: WorldState;
   loop: GameLoop;
   saver: SaveScheduler;
+  build: BuildState;
   offline: OfflineReport;
 }
 
@@ -46,8 +48,16 @@ export async function boot(explicitWorldId: string | null, canvas: HTMLCanvasEle
   const worldId = data.world.id;
 
   const engine = new SimulationEngine();
-  const world = new WorldState(engine, data.research);
+  // `saver` is created below; the dirty handler closes over it so edits made
+  // before it exists are simply ignored (there is nothing to build yet).
+  let saver: SaveScheduler | undefined;
+  const world = new WorldState(engine, data.research, data.world.seed, (cx, cy) =>
+    saver?.markDirty(cx, cy)
+  );
   world.ingest(data.chunks);
+
+  // The factory-IO pass (machine<->belt item transfer) runs every sim tick.
+  engine.onTick(() => world.factoryTick());
 
   // 2. OFFLINE CATCH-UP: fast-forward the gap before the player sees anything.
   const gapSeconds = Math.max(0, (data.serverNow - data.world.lastSavedAt) / 1000);
@@ -58,14 +68,15 @@ export async function boot(explicitWorldId: string | null, canvas: HTMLCanvasEle
   // 3. LIVE engine + Pixi renderer (fixed-step sim decoupled from vsync).
   const app = new Application();
   await app.init({ canvas, antialias: true, background: "#10141c", resizeTo: window });
-  const loop = new GameLoop(app, engine);
+  const build = createBuildState();
+  const loop = new GameLoop(app, engine, world, build);
   loop.start();
 
   // 4. AUTOSAVE: dirty-chunk flush every 45s + beacon on disconnect.
-  const saver = new SaveScheduler(worldId, world);
+  saver = new SaveScheduler(worldId, world);
   saver.start();
 
-  return { engine, world, loop, saver, offline };
+  return { engine, world, loop, saver, build, offline };
 }
 
 /**

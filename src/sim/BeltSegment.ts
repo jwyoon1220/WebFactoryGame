@@ -152,6 +152,22 @@ export class BeltSegment {
     return removed.item;
   }
 
+  // --- Rendering ------------------------------------------------------------
+
+  /**
+   * Visit each item with its distance from the exit (0 = at the exit line,
+   * `length` = at the entry). The renderer maps this to a position along the
+   * belt path for smooth visuals. Front-to-back order.
+   */
+  forEachItem(cb: (item: ItemId, distFromExit: number) => void): void {
+    let dist = 0;
+    for (let i = 0; i < this.items.length; i++) {
+      dist += this.items[i].gap;
+      cb(this.items[i].item, dist);
+      dist += ITEM_LEN;
+    }
+  }
+
   // --- Persistence ----------------------------------------------------------
 
   /** Snapshot for debugging / deterministic tests. */
