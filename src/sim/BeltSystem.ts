@@ -62,6 +62,13 @@ export class BeltSystem {
     this.sinks.set(segmentId, sink);
   }
 
+  /** Remove a segment (belt tile deleted). Any sinks pointing at it fall back
+   *  to "none" on the next rebuild by the caller. */
+  removeSegment(segmentId: number): void {
+    this.segments.delete(segmentId);
+    this.sinks.delete(segmentId);
+  }
+
   addSplitter(node: SplitterNode): void {
     this.splitters.set(node.id, node);
   }
