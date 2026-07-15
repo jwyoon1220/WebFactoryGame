@@ -22,8 +22,10 @@ import {
   MachineState,
   TICKS_PER_SECOND,
   type AnyEntity,
+  type ChestEntity,
   type ChunkTileData,
   type Direction,
+  type Inventory,
   type MachineEntity,
   type ResearchState,
 } from "@shared/types";
@@ -49,6 +51,8 @@ const DEFAULT_RECIPE: Partial<Record<EntityType, number>> = {
 };
 
 const INPUT_ACCEPT_CAP = 50;
+/** Per-item cap on what a chest can hold, mirroring machine OUTPUT_CAP. */
+const CHEST_ITEM_CAP = 200;
 
 export class WorldState implements ChunkSource {
   private chunks = new Map<string, ChunkTileData>();
@@ -58,6 +62,9 @@ export class WorldState implements ChunkSource {
   private beltSegAt = new Map<string, number>();
   /** Entity id -> its global tile, for O(1) origin lookup in factoryTick. */
   private idTile = new Map<number, { tx: number; ty: number }>();
+  /** Chest entities, indexed like engine.machines so factoryTick can eject
+   *  from them without scanning the whole entity grid every tick. */
+  private chests = new Map<number, ChestEntity>();
   private nextId = 1;
   private nextSegId = 1;
 
@@ -116,6 +123,8 @@ export class WorldState implements ChunkSource {
       const seg = new BeltSegment(segId, [{ x: tx, y: ty }], speed);
       this.engine.belts.addSegment(seg);
       this.beltSegAt.set(this.tk(tx, ty), segId);
+    } else if (e.type === EntityType.Chest) {
+      this.chests.set(e.id, e);
     }
   }
 
@@ -197,6 +206,8 @@ export class WorldState implements ChunkSource {
       if (segId !== undefined) this.engine.belts.removeSegment(segId);
       this.beltSegAt.delete(this.tk(tx, ty));
       this.rebuildBeltLinks();
+    } else if (e.type === EntityType.Chest) {
+      this.chests.delete(e.id);
     }
     this.onDirty(cx, cy);
     return true;
@@ -238,31 +249,25 @@ export class WorldState implements ChunkSource {
   // --- Factory IO (runs every sim tick via engine hook) ---------------------
 
   /**
-   * Move items across machine<->belt boundaries the pure systems don't own:
-   *   1. a machine ejects finished output onto the belt it faces;
-   *   2. a belt whose head faces a machine feeds that machine's input.
+   * Move items across machine/chest<->belt boundaries the pure systems don't
+   * own:
+   *   1. a machine or chest ejects an item onto the belt it faces;
+   *   2. a belt whose head faces a machine or chest feeds it.
    * Belt<->belt flow is already handled inside BeltSystem.tick().
+   *
+   * Chests are deliberately symmetric with machines here — a chest with a
+   * belt pointed at it must actually absorb items (it's the natural "storage
+   * sink" a player puts at the end of a line), otherwise that belt fills up
+   * within seconds and backpressure cascades all the way to the miner, which
+   * then looks exactly like "items stop appearing" even though nothing is
+   * actually being lost — just permanently stuck with nowhere to go.
    */
   factoryTick(): void {
-    // 1. Machine output -> the belt in front of it.
-    for (const m of this.engine.machines.values()) {
-      const item = firstItem(m.output);
-      if (item === ItemId.None) continue;
-      const origin = this.idTile.get(m.id);
-      if (!origin) continue;
-      const [dx, dy] = DIR_VEC[m.dir];
-      const tx = origin.tx + dx;
-      const ty = origin.ty + dy;
-      const segId = this.beltSegAt.get(this.tk(tx, ty));
-      if (segId === undefined) continue;
-      const seg = this.engine.belts.getSegment(segId);
-      if (seg && seg.canAccept()) {
-        seg.pushBack(item);
-        m.output[item] = (m.output[item] ?? 0) - 1;
-      }
-    }
+    // 1. Machine/chest output -> the belt in front of it.
+    for (const m of this.engine.machines.values()) this.ejectOnto(m.id, m.dir, m.output);
+    for (const c of this.chests.values()) this.ejectOnto(c.id, c.dir, c.inventory);
 
-    // 2. Belt head -> machine input (belt must point into the machine).
+    // 2. Belt head -> machine input or chest storage (belt must point at it).
     for (const [tileKey, segId] of this.beltSegAt) {
       const seg = this.engine.belts.getSegment(segId);
       if (!seg || !seg.headReady) continue;
@@ -271,12 +276,33 @@ export class WorldState implements ChunkSource {
       const [tx, ty] = tileKey.split(",").map(Number);
       const [dx, dy] = DIR_VEC[belt.dir];
       const target = this.entityGrid.get(this.tk(tx + dx, ty + dy));
-      if (!target || !isMachine(target)) continue;
+      if (!target) continue;
       const head = seg.peekHead();
-      if (this.machineAccepts(target, head)) {
+      if (isMachine(target)) {
+        if (!this.machineAccepts(target, head)) continue;
         seg.popHead();
         target.input[head] = (target.input[head] ?? 0) + 1;
+      } else if (target.type === EntityType.Chest) {
+        if ((target.inventory[head] ?? 0) >= CHEST_ITEM_CAP) continue;
+        seg.popHead();
+        target.inventory[head] = (target.inventory[head] ?? 0) + 1;
       }
+    }
+  }
+
+  /** Push one item from `inv` onto the belt tile `dir` steps ahead of `originId`. */
+  private ejectOnto(originId: number, dir: Direction, inv: Inventory): void {
+    const item = firstItem(inv);
+    if (item === ItemId.None) return;
+    const origin = this.idTile.get(originId);
+    if (!origin) return;
+    const [dx, dy] = DIR_VEC[dir];
+    const segId = this.beltSegAt.get(this.tk(origin.tx + dx, origin.ty + dy));
+    if (segId === undefined) return;
+    const seg = this.engine.belts.getSegment(segId);
+    if (seg && seg.canAccept()) {
+      seg.pushBack(item);
+      inv[item] = (inv[item] ?? 0) - 1;
     }
   }
 
